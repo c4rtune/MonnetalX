@@ -1,0 +1,95 @@
+name: MonntalX
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+
+    permissions:
+      pull-requests: write
+      issues: write
+      contents: read
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          repository: c4rtune/actionBotTestingGroung
+          token: ${{ secrets.MONNETAL_X_TOKEN }}
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # ✅ Cache pip + models (BIG speed boost)
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.cache/torch
+            ~/.cache/huggingface
+          key: ${{ runner.os }}-deps-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-deps-
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install \
+            requests \
+            beautifulsoup4 \
+            python-dotenv \
+            openai \
+            lightgbm \
+            sentence-transformers \
+            PyGithub \
+            numpy \
+            pandas
+
+      # ✅ Ensure model exists (IMPORTANT)
+      - name: Check model file
+        run: |
+          if [ ! -f "app/AI_model_class/model.txt" ]; then
+            echo "❌ model.txt not found!"
+            exit 1
+          fi
+
+      # ✅ Check for links in PR
+      - name: Check if PR contains links
+        id: check_links
+        run: |
+          BODY=$(cat << 'EOF'
+          ${{ github.event.pull_request.body }}
+          EOF
+          )
+
+          echo "PR Body:"
+          echo "$BODY"
+
+          if echo "$BODY" | grep -qE "https?://"; then
+            echo "has_links=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_links=false" >> $GITHUB_OUTPUT
+          fi
+
+      # ✅ Run bot ONLY if links exist
+      - name: Run PR bot
+        if: steps.check_links.outputs.has_links == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.MONNETAL_X_TOKEN }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+        run: |
+          python -m app.scripts.pr_comment
+
+      - name: No links found
+        if: steps.check_links.outputs.has_links == 'false'
+        run: echo "❌ No links found in PR body. Skipping bot."
