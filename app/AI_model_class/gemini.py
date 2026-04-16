@@ -185,8 +185,6 @@ def summarize_link(
             - Pull request description
             - Repository title
             - Repository description
-            - Link placement within the PR (description, comment, or review comment)
-            - Surrounding comment text if available
             - Link metadata (title, description, body)
 
             Your Task:
@@ -207,10 +205,11 @@ def summarize_link(
                 {
                     "role": "user",
                     "content": f"""
-PR: {pr_title}
-{pr_body[:500]}
+PR title: {pr_title}
+PR description: {pr_body[:500]}
 
-Repo: {repo_name} - {repo_description}
+Repo: {repo_name}
+Repo description: {repo_description}
 
 Link:
 Title: {link_title}
