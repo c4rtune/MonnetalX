@@ -17,7 +17,7 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
         with:
-          repository: c4rtune/actionBotTestingGroung
+          repository: ${{ github.repository }}
           token: ${{ secrets.MONNETAL_X_TOKEN }}
           fetch-depth: 1
 
