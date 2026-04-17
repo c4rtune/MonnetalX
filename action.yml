@@ -1,0 +1,79 @@
+name: "MonnetalX"
+description: "AI-powered Pull Request link analyzer that extracts, ranks, summarizes, and comments relevant links directly on GitHub PRs."
+author: "MonnetalX"
+
+branding:
+  icon: "search"
+  color: "blue"
+
+inputs:
+  github_token:
+    description: "GitHub token with permission to read repository contents and write PR comments."
+    required: true
+
+  deepseek_api_key:
+    description: "API key used for AI summarization."
+    required: true
+
+  hf_token:
+    description: "Optional Hugging Face token for faster model downloads."
+    required: false
+    default: ""
+
+  max_links:
+    description: "Maximum number of links to analyze from the PR description."
+    required: false
+    default: "5"
+
+runs:
+  using: "composite"
+
+  steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
+        token: ${{ inputs.github_token }}
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Cache pip dependencies
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: monnetalx-pip-${{ runner.os }}-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          monnetalx-pip-${{ runner.os }}-
+
+    - name: Cache model files
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/huggingface
+        key: monnetalx-hf-${{ runner.os }}
+
+    - name: Install dependencies
+      shell: bash
+      run: |
+        python -m pip install --upgrade pip
+        if [ -f requirements.txt ]; then
+          pip install -r requirements.txt
+        else
+          pip install requests beautifulsoup4 python-dotenv openai lightgbm sentence-transformers PyGithub numpy pandas
+        fi
+
+    - name: Run MonnetalX
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github_token }}
+        DEEPSEEK_API_KEY: ${{ inputs.deepseek_api_key }}
+        HF_TOKEN: ${{ inputs.hf_token }}
+        MAX_LINKS: ${{ inputs.max_links }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        REPO_OWNER: ${{ github.repository_owner }}
+        REPO_NAME: ${{ github.event.repository.name }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+      run: |
+        python -m app.scripts.pr_comment
