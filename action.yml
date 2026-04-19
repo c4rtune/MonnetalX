@@ -66,14 +66,13 @@ runs:
 
     - name: Run MonnetalX
       shell: bash
+      working-directory: ${{ github.action_path }}
       env:
+        PYTHONPATH: ${{ github.action_path }}
         GITHUB_TOKEN: ${{ inputs.github_token }}
         DEEPSEEK_API_KEY: ${{ inputs.deepseek_api_key }}
-        HF_TOKEN: ${{ inputs.hf_token }}
-        MAX_LINKS: ${{ inputs.max_links }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         REPO_OWNER: ${{ github.repository_owner }}
         REPO_NAME: ${{ github.event.repository.name }}
         GITHUB_REPOSITORY: ${{ github.repository }}
-      run: |
-        python -m app.scripts.pr_comment
+      run: python -m app.scripts.pr_comment
