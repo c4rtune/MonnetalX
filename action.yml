@@ -8,28 +8,19 @@ branding:
 
 inputs:
   github_token:
-    description: "GitHub token with permission to read repository contents and write PR comments."
+    description: "Token used to read repository data and post PR comments."
     required: true
 
   deepseek_api_key:
     description: "API key used for AI summarization."
     required: true
 
-  hf_token:
-    description: "Optional Hugging Face token for faster model downloads."
-    required: false
-    default: ""
-
-  max_links:
-    description: "Maximum number of links to analyze from the PR description."
-    required: false
-    default: "5"
-
 runs:
   using: "composite"
 
   steps:
-    - name: Checkout repository
+    # Checkout CALLER repository (the repo using MonnetalX)
+    - name: Checkout target repository
       uses: actions/checkout@v4
       with:
         fetch-depth: 1
@@ -44,11 +35,11 @@ runs:
       uses: actions/cache@v4
       with:
         path: ~/.cache/pip
-        key: monnetalx-pip-${{ runner.os }}-${{ hashFiles('**/requirements.txt') }}
+        key: monnetalx-pip-${{ runner.os }}-${{ github.action_ref }}
         restore-keys: |
           monnetalx-pip-${{ runner.os }}-
 
-    - name: Cache model files
+    - name: Cache Hugging Face models
       uses: actions/cache@v4
       with:
         path: ~/.cache/huggingface
@@ -56,8 +47,10 @@ runs:
 
     - name: Install dependencies
       shell: bash
+      working-directory: ${{ github.action_path }}
       run: |
         python -m pip install --upgrade pip
+
         if [ -f requirements.txt ]; then
           pip install -r requirements.txt
         else
@@ -75,4 +68,5 @@ runs:
         REPO_OWNER: ${{ github.repository_owner }}
         REPO_NAME: ${{ github.event.repository.name }}
         GITHUB_REPOSITORY: ${{ github.repository }}
-      run: python -m app.scripts.pr_comment
+      run: |
+        python -m app.scripts.pr_comment
