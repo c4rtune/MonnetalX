@@ -206,7 +206,7 @@ def summarize_link(
                     "role": "user",
                     "content": f"""
 PR title: {pr_title}
-PR description: {pr_body[:500]}
+PR description: {pr_body}
 
 Repo: {repo_name}
 Repo description: {repo_description}
@@ -214,7 +214,7 @@ Repo description: {repo_description}
 Link:
 Title: {link_title}
 Desc: {link_description}
-Content: {link_body[:1000]}
+Content: {link_body}
 """,
                 },
             ],
