@@ -50,45 +50,62 @@ def is_text_response(response) -> bool:
 # -------------------------
 def extract_markdown_links(text, repo_name):
     """
-    Extracts:
-    - Markdown links
+    Extracts from PR text:
+    - Markdown links [text](url)
     - Raw URLs
-    - GitHub issue references (#123)
-    - Keywords like Fixes/Closes
+    - GitHub issue refs anywhere: #123, (#123), (#12, #34)
+    - Keywords like Fixes/Closes/Resolves #123
 
-    Returns: dict {url: display_text}
+    Excludes:
+    - Anything inside HTML comments <!-- ... -->
+
+    Returns:
+        dict {url: display_text}
     """
+
     links = {}
 
-    # -------------------------
+    # ---------------------------------
+    # 0. Remove HTML comments first
+    # ---------------------------------
+    text = re.sub(r'<!--.*?-->', '', text, flags=re.DOTALL)
+
+    # ---------------------------------
     # 1. Markdown links
-    # -------------------------
-    md_pattern = r'\[([^\]]+)\]\((https?://[^\)]+)\)'
+    # ---------------------------------
+    md_pattern = r'\[([^\]]+)\]\((https?://[^\s)]+(?:\)[^\s)]*)?)\)'
+
     for display_text, url in re.findall(md_pattern, text):
-        clean_url = url.strip().rstrip(').,')
+        clean_url = url.strip().rstrip('.,')
         links[clean_url] = display_text
 
-    # Remove markdown to avoid duplicates
+    # Remove markdown links to avoid duplicate raw URL matches
     text = re.sub(md_pattern, '', text)
 
-    # -------------------------
+    # ---------------------------------
     # 2. GitHub issue refs (#123)
-    # -------------------------
-    issue_pattern = r'\b(?:Fixes|Closes|Resolves)?\s*#(\d+)'
-    for match in re.findall(issue_pattern, text):
-        issue_number = match
+    # Supports:
+    #   #123
+    #   (#123)
+    #   (#123, #456)
+    #   Fixes #123
+    # ---------------------------------
+    issue_pattern = r'#(\d+)'
+
+    for issue_number in re.findall(issue_pattern, text):
         url = f"https://github.com/{repo_name}/issues/{issue_number}"
         links[url] = f"#{issue_number}"
 
-    # Remove issue refs so they don’t interfere
+    # Remove issue refs
     text = re.sub(issue_pattern, '', text)
 
-    # -------------------------
+    # ---------------------------------
     # 3. Raw URLs
-    # -------------------------
-    raw_pattern = r'https?://[^\s]+'
+    # ---------------------------------
+    raw_pattern = r'https?://[^\s)>]+'
+
     for url in re.findall(raw_pattern, text):
-        clean_url = url.strip().rstrip(').,')
+        clean_url = url.strip().rstrip('.,')
         if clean_url not in links:
             links[clean_url] = clean_url
 
