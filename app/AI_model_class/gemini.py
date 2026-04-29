@@ -4,6 +4,7 @@ import os
 from bs4 import BeautifulSoup
 from openai import OpenAI
 from functools import lru_cache
+from markdown_it import MarkdownIt
 
 # -----------------------------------
 # OPTIONAL GITHUB GRAPHQL SUPPORT
@@ -216,65 +217,122 @@ def fetch_github_pr_links(pr_url: str):
 # =====================================================
 def extract_markdown_links(text, repo_name):
     """
-    Extracts from PR text:
+    Drop-in replacement for existing extractor.
+
+    Preserves current behavior:
     - Markdown links [text](url)
     - Raw URLs
-    - GitHub issue refs anywhere: #123, (#123), (#12, #34)
-    - Keywords like Fixes/Closes/Resolves #123
+    - GitHub issue refs anywhere: #123
+    - Works after removing HTML comments
+    - Returns: dict {url: display_text}
 
-    Excludes:
-    - Anything inside HTML comments <!-- ... -->
-
-    Returns:
-        dict {url: display_text}
+    Fixes:
+    - No trailing ')' bugs
+    - No false parsing of nested markdown
+    - Ignores links inside inline/fenced code
+    - More reliable than regex parsing
     """
 
     links = {}
 
     # ---------------------------------
-    # 0. Remove HTML comments first
+    # 0. Remove HTML comments
     # ---------------------------------
-    text = re.sub(r'<!--.*?-->', '', text, flags=re.DOTALL)
+    text = re.sub(r'<!--.*?-->', '', str(text or ''), flags=re.DOTALL)
 
     # ---------------------------------
-    # 1. Markdown links
+    # 1. Parse markdown safely
     # ---------------------------------
-    md_pattern = r'\[([^\]]+)\]\((https?://[^\s)]+(?:\)[^\s)]*)?)\)'
+    md = MarkdownIt()
+    tokens = md.parse(text)
 
-    for display_text, url in re.findall(md_pattern, text):
-        clean_url = url.strip().rstrip('.,')
-        display_text = display_text.strip().rstrip(").,;:")
-        links[clean_url] = display_text
+    issue_text_parts = []
 
-    # Remove markdown links to avoid duplicate raw URL matches
-    text = re.sub(md_pattern, '', text)
+    def clean_label(s):
+        return str(s or "").strip().rstrip(").,;:]}")
+
+    def clean_url(s):
+        return str(s or "").strip().rstrip(").,;:]}")
 
     # ---------------------------------
-    # 2. GitHub issue refs (#123)
-    # Supports:
-    #   #123
-    #   (#123)
-    #   (#123, #456)
-    #   Fixes #123
+    # 2. Extract markdown links
     # ---------------------------------
-    issue_pattern = r'#(\d+)'
+    for token in tokens:
 
-    for issue_number in re.findall(issue_pattern, text):
+        # collect plain text later for issue refs / raw urls
+        if token.type == "inline" and token.children:
+            children = token.children
+            i = 0
+
+            while i < len(children):
+                child = children[i]
+
+                # -------------------------
+                # Real markdown links
+                # -------------------------
+                if child.type == "link_open":
+                    attrs = dict(child.attrs or {})
+                    href = attrs.get("href", "")
+
+                    label_parts = []
+                    i += 1
+
+                    while i < len(children):
+                        inner = children[i]
+
+                        if inner.type == "link_close":
+                            break
+
+                        if inner.type in (
+                            "text",
+                            "code_inline",
+                            "html_inline"
+                        ):
+                            label_parts.append(inner.content)
+
+                        i += 1
+
+                    label = clean_label("".join(label_parts))
+                    href = clean_url(href)
+
+                    if href.startswith("http"):
+                        links[href] = label or href
+
+                # -------------------------
+                # gather visible text only
+                # -------------------------
+                elif child.type == "text":
+                    issue_text_parts.append(child.content + " ")
+
+                i += 1
+
+        elif token.type == "text":
+            issue_text_parts.append(token.content + " ")
+
+    plain_text = "".join(issue_text_parts)
+
+    # ---------------------------------
+    # 3. GitHub issue refs (#123)
+    # ---------------------------------
+    for issue_number in re.findall(r'#(\d+)', plain_text):
         url = f"https://github.com/{repo_name}/issues/{issue_number}"
-        links[url] = f"#{issue_number}"
 
-    # Remove issue refs
-    text = re.sub(issue_pattern, '', text)
+        if url not in links:
+            links[url] = f"#{issue_number}"
+
+    # Remove refs before raw URL pass
+    plain_text = re.sub(r'#\d+', ' ', plain_text)
 
     # ---------------------------------
-    # 3. Raw URLs
+    # 4. Raw URLs
     # ---------------------------------
-    raw_pattern = r'https?://[^\s)>]+'
+    raw_pattern = r'https?://[^\s<>()]+'
 
-    for url in re.findall(raw_pattern, text):
-        clean_url = url.strip().rstrip('.,')
-        if clean_url not in links:
-            links[clean_url] = clean_url
+    for url in re.findall(raw_pattern, plain_text):
+        url = clean_url(url)
+
+        if url not in links:
+            links[url] = url
 
     return links
 
