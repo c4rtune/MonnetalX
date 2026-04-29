@@ -65,7 +65,7 @@ def clean_pr_text(text: str) -> str:
 
     # remove checklist section onward
     text = re.split(
-        r"^\s*####\s+Checklist\s*$",
+        r"^\s*####\s*Checklist\b.*$",
         text,
         flags=re.MULTILINE
     )[0]
@@ -243,6 +243,7 @@ def extract_markdown_links(text, repo_name):
 
     for display_text, url in re.findall(md_pattern, text):
         clean_url = url.strip().rstrip('.,')
+        display_text = display_text.strip().rstrip(").,;:")
         links[clean_url] = display_text
 
     # Remove markdown links to avoid duplicate raw URL matches

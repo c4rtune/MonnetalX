@@ -9,6 +9,7 @@ from app.AI_model_class.gemini import (
     extract_markdown_links,
     fetch_link_metadata,
     summarize_link,
+    clean_pr_text,
 )
 from app.AI_model_class.monnetalRanker import MonnetalRanker
 
@@ -64,7 +65,8 @@ if not re.search(r'https?://|\[[^\]]+\]\((https?://[^\)]+)\)|#\d+', pr_body):
     exit(0)
     
 # EXTRACT LINKS
-link_map = extract_markdown_links(pr_body, REPO)
+clean_body = clean_pr_text(pr_body)
+link_map = extract_markdown_links(clean_body, REPO)
 links = list(link_map)
 
 if not links:
