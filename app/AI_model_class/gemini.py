@@ -216,89 +216,68 @@ def fetch_github_pr_links(pr_url: str):
 # =====================================================
 def extract_markdown_links(text, repo_name):
     """
-    Hybrid extractor:
+    Extracts from PR text:
+    - Markdown links [text](url)
+    - Raw URLs
+    - GitHub issue refs anywhere: #123, (#123), (#12, #34)
+    - Keywords like Fixes/Closes/Resolves #123
 
-    1. remove template/checklist/comments
-    2. extract normal URLs
-    3. convert #123 -> GitHub issue URL
-    4. supports owner/repo#123
+    Excludes:
+    - Anything inside HTML comments <!-- ... -->
+
+    Returns:
+        dict {url: display_text}
     """
 
-    text = clean_pr_text(text)
+    links = {}
 
-    # -----------------------------------
-    # FULL URLS
-    # -----------------------------------
-    url_pattern = re.compile(
-        r'https?://[^\s)\]>"]+'
-    )
+    # ---------------------------------
+    # 0. Remove HTML comments first
+    # ---------------------------------
+    text = re.sub(r'<!--.*?-->', '', text, flags=re.DOTALL)
 
-    urls = url_pattern.findall(text)
+    # ---------------------------------
+    # 1. Markdown links
+    # ---------------------------------
+    md_pattern = r'\[([^\]]+)\]\((https?://[^\s)]+(?:\)[^\s)]*)?)\)'
 
-    # -----------------------------------
-    # owner/repo#123
-    # -----------------------------------
-    cross_repo_pattern = re.compile(
-        r'([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#(\d+)'
-    )
+    for display_text, url in re.findall(md_pattern, text):
+        clean_url = url.strip().rstrip('.,')
+        links[clean_url] = display_text
 
-    cross_refs = [
-        f"https://github.com/{repo}/issues/{num}"
-        for repo, num in cross_repo_pattern.findall(text)
-    ]
+    # Remove markdown links to avoid duplicate raw URL matches
+    text = re.sub(md_pattern, '', text)
 
-    # -----------------------------------
-    # #123
-    # -----------------------------------
-    issue_pattern = re.compile(
-        r'(?<![\w/])#(\d+)'
-    )
+    # ---------------------------------
+    # 2. GitHub issue refs (#123)
+    # Supports:
+    #   #123
+    #   (#123)
+    #   (#123, #456)
+    #   Fixes #123
+    # ---------------------------------
+    issue_pattern = r'#(\d+)'
 
-    nums = issue_pattern.findall(text)
+    for issue_number in re.findall(issue_pattern, text):
+        url = f"https://github.com/{repo_name}/issues/{issue_number}"
+        links[url] = f"#{issue_number}"
 
-    same_repo_refs = [
-        f"https://github.com/{repo_name}/issues/{n}"
-        for n in nums
-    ]
+    # Remove issue refs
+    text = re.sub(issue_pattern, '', text)
 
-    # -----------------------------------
-    # COMBINE
-    # -----------------------------------
-    links = urls + cross_refs + same_repo_refs
+    # ---------------------------------
+    # 3. Raw URLs
+    # ---------------------------------
+    raw_pattern = r'https?://[^\s)>]+'
 
-    seen = set()
-    results = []
+    for url in re.findall(raw_pattern, text):
+        clean_url = url.strip().rstrip('.,')
+        if clean_url not in links:
+            links[clean_url] = clean_url
 
-    for x in links:
-        if x not in seen:
-            seen.add(x)
-            results.append(x)
+    return links
 
-    return results
-
-
-def extract_links(text, repo_name):
-    """
-    Main extractor for copied PR body text.
-    """
-    return extract_markdown_links(text, repo_name)
-
-
-def extract_links_from_real_pr(pr_url: str, fallback_text: str, repo_name: str):
-    """
-    If real GitHub PR URL available:
-    use GraphQL first, fallback to regex parser.
-    """
-
-    links = fetch_github_pr_links(pr_url)
-
-    if links:
-        return links
-
-    return extract_markdown_links(fallback_text, repo_name)
-
-
-# =====================================================
+# -------------------------
 # HTML PARSING
 # =====================================================
 def fetch_link_metadata(url: str):
