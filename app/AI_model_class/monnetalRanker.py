@@ -1,67 +1,69 @@
 import os
+import re
+from functools import lru_cache
+from urllib.request import urlopen
 
 import lightgbm as lgb
-import re
-from github import Github, GithubException, Auth
-from urllib.request import urlopen
-from sentence_transformers import SentenceTransformer
-       
 import numpy as np
-import pandas as pd
+from github import Github, GithubException, Auth
+from sentence_transformers import SentenceTransformer
 
 
 class MonnetalRanker:
-    
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     MODEL_PATH = os.path.join(BASE_DIR, "model.txt")
-    
-    GITHUB_LINK_PATTERN = re.compile(r"https://github\.com/(?P<repo>[^/]+/[^/]+)/(pull|issues)/(?P<pr>\d+)")
-    COMMENT_PATTERN = re.compile(
-        r"https://github\.com/(?P<repo>[^/]+/[^/]+)/(pull|issues)/(?P<pr>\d+)#(?P<type>pullrequestreview|issuecomment)-(?P<comment_id>\d+)"
+
+    GITHUB_LINK_PATTERN = re.compile(
+        r"https://github\.com/(?P<repo>[^/]+/[^/]+)/(pull|issues)/(?P<num>\d+)"
     )
-    def __init__(self, model_path: str, gh_token: str, vectorizer=None, repo_name=None):
-        """
-        Initializes the MonnetalRanker.
 
+    COMMENT_PATTERN = re.compile(
+        r"https://github\.com/(?P<repo>[^/]+/[^/]+)/(pull|issues)/(?P<num>\d+)"
+        r"#(?P<type>pullrequestreview|issuecomment)-(?P<comment_id>\d+)"
+    )
+
+    COMMIT_PATTERN = re.compile(
+        r"https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/commit/(?P<sha>[a-f0-9]{7,40})"
+    )
+
+    def __init__(
+        self,
+        model_path: str,
+        gh_token: str,
+        vectorizer=None,
+        repo_name=None,
+    ):
+        """
         Args:
-            model_path (str): Path to the LightGBM model file (relative or absolute).
-            gh_token (str): GitHub Personal Access Token.
-            vectorizer: Optional preloaded embedding model.
-            repo_name (str): Repo in format 'owner/repo'.
+            model_path: path to LightGBM model
+            gh_token: GitHub token
+            vectorizer: optional preloaded embedding model
+            repo_name: source repo in owner/repo format
         """
-        import os
-        import lightgbm as lgb
-        from github import Github, Auth
-        from sentence_transformers import SentenceTransformer
-
-        # ✅ Store repo name
-        self.repo = repo_name  # expected: "owner/repo"
-
-        # ✅ Resolve model path RELATIVE to this file (fixes GitHub Actions issue)
-        BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+        self.repo = repo_name
 
         if not os.path.isabs(model_path):
-            model_path = os.path.join(BASE_DIR, model_path)
-
-        print(f"📦 Loading model from: {model_path}")  # helpful debug
+            model_path = os.path.join(self.BASE_DIR, model_path)
 
         if not os.path.exists(model_path):
-            raise FileNotFoundError(f"❌ Model not found at: {model_path}")
+            raise FileNotFoundError(f"Model not found: {model_path}")
 
-        # ✅ Load LightGBM model
         self.ranker = lgb.Booster(model_file=model_path)
 
-        # ✅ GitHub client
         auth = Auth.Token(gh_token)
         self.g = Github(auth=auth)
 
-        # ✅ Use passed vectorizer OR create one (fix bug)
-        if vectorizer is not None:
-            self.vectorizer = vectorizer
-        else:
-            self.vectorizer = SentenceTransformer('all-MiniLM-L6-v2')
+        self.vectorizer = (
+            vectorizer
+            if vectorizer is not None
+            else SentenceTransformer("all-MiniLM-L6-v2")
+        )
 
-        print("✅ MonnetalRanker initialized successfully")
+        print("MonnetalRanker initialized")
+
+    # ==========================================================
+    # TEXT HELPERS
+    # ==========================================================
 
     def _clean_html(self, text: str) -> str:
         text = re.sub(r"<script.*?>.*?</script>", " ", text, flags=re.DOTALL)
@@ -70,183 +72,254 @@ class MonnetalRanker:
         text = re.sub(r"\s+", " ", text).strip()
         return text
 
-    def getNum(self, url: str):
-        match = self.GITHUB_LINK_PATTERN.search(url)
-        if match:
-            try:
-                return match.group("repo"), int(match.group("pr"))
-            except ValueError:
-                return None, None
-        return None, None
+    def _tokenize(self, text: str):
+        return re.findall(r"\w+", str(text).lower())
 
-    def scrap(self, url: str) -> str:
-        
-        if not url:
-            return "404 no body found"
+    def get_ngrams(self, text: str, n: int):
+        tokens = self._tokenize(text)
+        return [
+            " ".join(tokens[i : i + n])
+            for i in range(len(tokens) - n + 1)
+        ]
+
+    def ngram_overlap(self, q: str, d: str, n: int = 2) -> float:
+        q_ngrams = set(self.get_ngrams(q, n))
+        d_ngrams = set(self.get_ngrams(d, n))
+
+        if not q_ngrams:
+            return 0.0
+
+        return float(len(q_ngrams & d_ngrams)) / float(len(q_ngrams))
+
+    # ==========================================================
+    # GITHUB HELPERS
+    # ==========================================================
+
+    def getNum(self, url: str):
+        match = self.GITHUB_LINK_PATTERN.search(str(url))
+        if not match:
+            return None, None
 
         try:
-          
-            comment_match = self.COMMENT_PATTERN.match(url)
-            if comment_match:
-                repo_name = comment_match.group("repo")
-                num = int(comment_match.group("pr"))
-                comment_id = int(comment_match.group("comment_id"))
-                comment_type = comment_match.group("type")
-                repo = self.g.get_repo(repo_name)
+            return match.group("repo"), int(match.group("num"))
+        except Exception:
+            return None, None
 
-                try:
-                    if comment_type == "issuecomment":
-                        issue = repo.get_issue(num)
-                        return issue.get_comment(comment_id).body
-                    elif comment_type == "pullrequestreview":
-                        # For PR review comments (line comments on code)
-                        try:
-                            pr = repo.get_pull(num)
-                            return pr.get_review_comment(comment_id).body
-                        except GithubException:
-                            # If it's not a review comment, it might be the body of a review itself
-                            # PyGithub's get_review() takes a review ID for its body
-                            return repo.get_pull(num).get_review(comment_id).body
-                    else:
-                        raise ValueError("Unknown comment type in URL")
-                except GithubException:
-                    # Fallback if specific comment/review type fails, try general issue comment
-                    try:
-                        issue = repo.get_issue(num)
-                        return issue.get_comment(comment_id).body
-                    except GithubException:
-                        pass # Will fall to general error at the end of the try block
+    @lru_cache(maxsize=256)
+    def _get_repo(self, repo_name: str):
+        return self.g.get_repo(repo_name)
 
-            github_link_match = self.GITHUB_LINK_PATTERN.match(url)
-            if github_link_match:
-                repo_name = github_link_match.group("repo")
-                num = int(github_link_match.group("pr"))
-                repo = self.g.get_repo(repo_name)
-                try:
-                    pr = repo.get_pull(num)
-                    return pr.body
-                except GithubException: 
-                    issue = repo.get_issue(num)
-                    return issue.body
+    def _get_author_login(self, repo_name: str, num: int) -> str:
+        try:
+            repo = self._get_repo(repo_name)
 
-            with urlopen(url) as response:
-                return self._clean_html(response.read().decode('utf-8'))
+            try:
+                pr = repo.get_pull(num)
+                return getattr(pr.user, "login", "")
+            except GithubException:
+                issue = repo.get_issue(num)
+                return getattr(issue.user, "login", "")
 
         except Exception:
-  
-            return "404 no body found"
+            return ""
 
-    def extract_ranking_features(self,content:str,link:str) -> np.ndarray:
-        """
-        Extracts a feature vector from a single data row (dictionary)
-        for use with the ranking model.
+    def _get_assignees(self, repo_name: str, num: int):
+        try:
+            repo = self._get_repo(repo_name)
 
-        Args:
-            content(str): content of the PR
-            link(str): link contained in the PR
-        Return:
-            arrays of features [ cosine , same repo , user match , code change ]
-              ( to be feeded into model )
+            try:
+                pr = repo.get_pull(num)
+                return [u.login for u in pr.assignees if hasattr(u, "login")]
+            except GithubException:
+                issue = repo.get_issue(num)
+                return [u.login for u in issue.assignees if hasattr(u, "login")]
+
+        except Exception:
+            return []
+
+    # ==========================================================
+    # SCRAPER
+    # ==========================================================
+
+    @lru_cache(maxsize=512)
+    def scrap(self, url: str) -> str:
+        if not url:
+            return ""
+
+        try:
+            comment_match = self.COMMENT_PATTERN.match(url)
+
+            if comment_match:
+                repo_name = comment_match.group("repo")
+                num = int(comment_match.group("num"))
+                comment_id = int(comment_match.group("comment_id"))
+                comment_type = comment_match.group("type")
+
+                repo = self._get_repo(repo_name)
+
+                if comment_type == "issuecomment":
+                    issue = repo.get_issue(num)
+                    return issue.get_comment(comment_id).body or ""
+
+                if comment_type == "pullrequestreview":
+                    try:
+                        pr = repo.get_pull(num)
+                        return pr.get_review_comment(comment_id).body or ""
+                    except GithubException:
+                        return repo.get_pull(num).get_review(comment_id).body or ""
+
+            gh_match = self.GITHUB_LINK_PATTERN.match(url)
+
+            if gh_match:
+                repo_name = gh_match.group("repo")
+                num = int(gh_match.group("num"))
+
+                repo = self._get_repo(repo_name)
+
+                try:
+                    return repo.get_pull(num).body or ""
+                except GithubException:
+                    return repo.get_issue(num).body or ""
+
+            with urlopen(url) as response:
+                html = response.read().decode("utf-8", errors="ignore")
+                return self._clean_html(html)
+
+        except Exception:
+            return ""
+
+    # ==========================================================
+    # FEATURES
+    # ==========================================================
+
+    def extract_ranking_features(self, content: str, link: str) -> np.ndarray:
         """
-        # ---- SAFE DEFAULTS ----
+        Returns:
+        [
+            cosine,
+            same_repo,
+            user_match,
+            code_change,
+            qlen,
+            unigram,
+            bigram,
+            trigram
+        ]
+        """
+
         cosine = 0.0
-        same_repo_flag = 0
-        user_match_flag = 0
-        code_change_flag = 0
+        same_repo = 0
+        user_match = 0
+        code_change = 0
+        qlen = 0
+        unigram = 0.0
+        bigram = 0.0
+        trigram = 0.0
 
-        # ---- SCRAPE CONTENT ----
-        repo = self.repo
         query_content = self.scrap(link)
 
-        # ---- COSINE SIMILARITY FEATURE ----
+        # -------------------------
+        # Semantic similarity
+        # -------------------------
         try:
             doc_v = self.vectorizer.encode(content)
             query_v = self.vectorizer.encode(query_content)
+
             sim = self.vectorizer.similarity(doc_v, query_v)
             cosine = float(sim[0][0])
+
         except Exception:
             cosine = 0.0
 
-        # ---- SAME REPO CHECK FEATURE ----
+        # -------------------------
+        # Lexical overlap
+        # -------------------------
         try:
-            # Check if the 'repo' field (e.g., "owner/repo") is present in the 'link' URL
-            same_repo_flag = 1 if str(repo) in str(link) else 0
+            unigram = self.ngram_overlap(query_content, content, 1)
+            bigram = self.ngram_overlap(query_content, content, 2)
+            trigram = self.ngram_overlap(query_content, content, 3)
         except Exception:
-            same_repo_flag = 0
+            pass
 
-        # ---- USER MATCH FEATURE ----
-        # Extract user of the PR/Issue from 'pr_link'
-        pr_user_login = ""
-        repo_name_pr, num_pr = self.getNum(link)
-        if repo_name_pr and num_pr:
+        # -------------------------
+        # Query length
+        # -------------------------
+        qlen = len(self._tokenize(query_content))
+
+        # -------------------------
+        # Same repo
+        # -------------------------
+        if self.repo and self.repo in str(link):
+            same_repo = 1
+
+        # -------------------------
+        # User match
+        # -------------------------
+        repo_name, num = self.getNum(link)
+
+        if repo_name and num:
+            author = self._get_author_login(repo_name, num)
+            assignees = self._get_assignees(repo_name, num)
+
+            if author and author in assignees:
+                user_match = 1
+
+        # -------------------------
+        # Code change feature
+        # -------------------------
+        commit_match = self.COMMIT_PATTERN.match(str(link))
+
+        if commit_match and self.repo:
             try:
-                repo_obj = self.g.get_repo(repo_name_pr)
-                try:
-                    pr = repo_obj.get_pull(num_pr)
-                    pr_user_login = getattr(pr.user, "login", "")
-                except GithubException: # Not a PR, try as an issue
-                    issue = repo_obj.get_issue(num_pr)
-                    pr_user_login = getattr(issue.user, "login", "")
-            except GithubException:
-                pass # pr_user_login remains empty
+                owner = commit_match.group("owner")
+                repo = commit_match.group("repo")
+                sha = commit_match.group("sha")
 
-        # Extract assignees from the 'link' URL (which could be another PR/Issue)
-        link_assignees_logins = []
-        repo_name_link, num_link = self.getNum(link)
-        if repo_name_link and num_link:
-            try:
-                repo_obj_link = self.g.get_repo(repo_name_link)
-                try:
-                    pr_link = repo_obj_link.get_pull(num_link)
-                    link_assignees_logins = [u.login for u in pr_link.assignees if hasattr(u, "login")]
-                except GithubException: # Not a PR, try as an issue
-                    issue_link = repo_obj_link.get_issue(num_link)
-                    link_assignees_logins = [u.login for u in issue_link.assignees if hasattr(u, "login")]
-            except GithubException:
-                pass # link_assignees_logins remains empty
-        
-        try:
-            user_match_flag = 1 if pr_user_login and pr_user_login in link_assignees_logins else 0
-        except Exception:
-            user_match_flag = 0
+                commit_repo = f"{owner}/{repo}"
 
-        # ---- CODE CHANGE FEATURE ----
-        # Check if the 'link' URL points to a commit within the *same* repository
-        commit_re = re.compile(r'https://github\.com/([^/]+)/([^/]+)/commit/([a-f0-9]{7,40})')
-        commit_match = commit_re.match(link)
+                if commit_repo.lower() == self.repo.lower():
+                    repo_obj = self._get_repo(commit_repo)
+                    repo_obj.get_commit(sha)
+                    code_change = 1
 
-        if commit_match and repo_name_pr: # Only proceed if link is a commit and we identified the PR's repo
-            try:
-                owner_commit, repo_name_commit, sha = commit_match.groups()
-                # Verify commit existence and if it belongs to the *same* repo as the 'pr_link'
-                if repo_name_pr.lower() == f"{owner_commit}/{repo_name_commit}".lower():
-                    repo_obj_commit = self.g.get_repo(f"{owner_commit}/{repo_name_commit}")
-                    # Just checking existence; will throw GithubException if commit doesn't exist
-                    repo_obj_commit.get_commit(sha)
-                    code_change_flag = 1
             except Exception:
-                pass # code_change_flag remains 0
+                pass
 
-        return np.array([
-            float(cosine),
-            int(same_repo_flag),
-            int(user_match_flag),
-            int(code_change_flag)
-        ])
+        return np.array(
+            [
+                float(cosine),
+                int(same_repo),
+                int(user_match),
+                int(code_change),
+                int(qlen),
+                float(unigram),
+                float(bigram),
+                float(trigram),
+            ]
+        )
 
-    def predict(self,input ) -> np.ndarray:
-        '''
-        Args: input expect to receive the format of
+    # ==========================================================
+    # PREDICT
+    # ==========================================================
+
+    def predict(self, input_data):
+        """
+        input_data format:
         {
-            "content": "",
-            "links": ["","",""......]
+            "content": "...",
+            "links": ["...", "..."]
         }
-        '''
+        """
 
         features_list = []
-        for link in input["links"]:
-            features = self.extract_ranking_features(input["content"],link)
-            features_list.append(features)
+
+        for link in input_data["links"]:
+            feats = self.extract_ranking_features(
+                input_data["content"],
+                link,
+            )
+            features_list.append(feats)
+
         X_predict = np.vstack(features_list)
-        
+
         return self.ranker.predict(X_predict)
