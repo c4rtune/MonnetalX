@@ -65,7 +65,7 @@ if not re.search(r'https?://|\[[^\]]+\]\((https?://[^\)]+)\)|#\d+', pr_body):
     
 # EXTRACT LINKS
 link_map = extract_markdown_links(pr_body, REPO)
-links = list(link_map.keys())
+links = list(link_map)
 
 if not links:
     message = "## 🔍 PR Link Analysis\n\n_No valid links found_"
